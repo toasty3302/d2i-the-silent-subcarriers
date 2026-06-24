@@ -1,0 +1,19 @@
+field,value
+task,Task 1 - Mutual information estimation
+row_granularity,One row is one antenna/position/RIS-configuration example.
+target,Scalar mutual information in bits.
+target_formula,0.5 * log2(1 + sample_variance + noise_variance)
+sample_variance,Mean squared deviation of clean measured center-subcarrier CSI packets.
+noise_variance,AWGN variance added to noisy channel samples.
+snr_db,10.0
+center_subcarrier,121
+n_selected_configurations,30
+samples_per_configuration,256
+train_ratio,0.7
+condition_count,8
+antenna_types,Dipole Log
+public_positions,1 2 3 5
+train_rows,168
+test_rows,72
+score,RMSE between predicted and true mi_bits.
+example_id_format,{antenna_type}_pos{position_id}_cfg{config_id:05d}

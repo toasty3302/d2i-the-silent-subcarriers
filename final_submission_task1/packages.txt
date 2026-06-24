@@ -1,0 +1,5 @@
+# Runtime dependencies for Task 1 (the_silent_subcarriers).
+# The solution imports only NumPy and the Python standard library, and runs on CPU
+# in well under a second. Version pinned to the environment used to produce the
+# shipped submission.csv.
+numpy==2.4.6

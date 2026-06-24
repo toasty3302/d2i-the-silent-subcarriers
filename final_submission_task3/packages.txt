@@ -1,0 +1,12 @@
+# Task 3 (the_silent_subcarriers) runtime dependencies.
+# The predictor is closed-form linear algebra; the bit read-out is a seeded Monte-Carlo
+# majority vote.  Runs on CPU with NumPy alone -- NO GPU, NO Sionna required at inference.
+# (Sionna was used only OFFLINE, once, to verify our pure-NumPy extractor is bit-exact.)
+numpy==2.4.6
+scipy==1.17.1          # scipy.io.loadmat for the RIS configuration .mat
+h5py==3.16.0           # streaming the per-frame CSI from the BRISC .mat files
+PyYAML==6.0.1          # reading config.yaml
+# torch (OPTIONAL) -- if present, only accelerates the Viterbi decode in the majority
+# vote; verified bit-for-bit identical to the NumPy path, so the score is unchanged.
+# The official baseline already depends on torch, so it is normally available.
+# torch>=2.0

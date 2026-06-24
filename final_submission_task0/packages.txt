@@ -1,0 +1,5 @@
+# Runtime dependencies for Task 0 (the_silent_subcarriers).
+# Reproducing the submission needs only NumPy + PyTorch and runs on CPU.
+# Generated with the equivalent of `pip freeze` for the two packages actually imported.
+numpy==2.4.6
+torch==2.12.0

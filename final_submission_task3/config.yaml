@@ -1,0 +1,71 @@
+# =============================================================================
+# BRISC Dataset Configuration  (Task 3 - the_silent_subcarriers)
+# =============================================================================
+# the_silent_subcarriers_3.py reads ONLY the `dataset.*` keys and `split.seed`
+# from this file.  The `split.mode`/`split.train_ratio`, `data.*` and `dataloader.*`
+# blocks below are the shared BRISC loader defaults and are NOT used by the Task 3
+# script (which fixes train_ratio=0.8 via --train-ratio and adds 35 dB AWGN itself,
+# per the Task 3 spec's effective SNR of 35 dB).
+# =============================================================================
+
+# ---- Dataset paths and file naming ------------------------------------------
+dataset:
+  # Root directory containing all .mat data files
+  root_dir: "../ISIT2026-challenge-dataset"
+
+  # Filename of the global RIS configurations (10000 configs, 16x16 each)
+  config_file: "configurations_10000.mat"
+
+  # Naming pattern for per-position CSI files.
+  # {ant_type} → "Dipole" or "Log"
+  # {pos_idx}  → 1, 2, ..., 9
+  file_pattern: "antenna{ant_type}_pos{pos_idx}.mat"
+
+  # All antenna types present in the dataset
+  antenna_types:
+    - "Dipole"
+    - "Log"
+
+  # All possible transmitter positions (1-indexed as in the paper)
+  all_positions: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+  # Positions released to the public (training data source)
+  public_positions: [1, 2, 3, 5]
+
+  # Number of OFDM subcarriers per CSI vector
+  n_subcarriers: 242
+
+  # RIS panel size (square)
+  ris_size: 16
+
+# ---- Train / validation / test split ----------------------------------------
+split:
+  # Split mode:
+  #   "pub_train"       → public positions = train, private positions = test
+  #   "pub_train_valid" → public positions = train + valid, private = test
+  mode: "pub_train"
+
+  # Fraction of public-position configs used for training (valid gets the rest)
+  train_ratio: 0.8
+
+  # Random seed for reproducible train/valid shuffling
+  seed: 42
+
+# ---- Data version and augmentation ------------------------------------------
+data:
+  # Data version:
+  #   "raw"       → every captured frame is a separate sample
+  #   "avg"       → frames are averaged per (ant_type, pos, config)
+  #   "avg_noise" → averaged frames + AWGN noise
+  version: "raw"
+
+  # SNR (dB) for the additive noise when version == "avg_noise".
+  # (Unused by the Task 3 script, which adds 35 dB AWGN itself; set to 35 here so
+  #  this file does not contradict the Task 3 effective-SNR of 35 dB.)
+  avg_noise_snr_db: 35.0
+
+# ---- DataLoader defaults ----------------------------------------------------
+dataloader:
+  batch_size: 32
+  num_workers: 0          # 0 = main process; increase for multi-process loading
+  shuffle_train: true

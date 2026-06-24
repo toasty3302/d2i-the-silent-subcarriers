@@ -1,0 +1,7 @@
+# Python dependencies for Task 2 (the_silent_subcarriers).
+# the_silent_subcarriers_2.py is pure NumPy + SciPy (reads the RIS .mat) + h5py (streams the CSI .mat).
+# No GPU / torch required. Versions below are the environment used to produce the
+# shipped proposed_configs.json; any reasonably recent release works.
+numpy==2.4.6
+scipy==1.17.1
+h5py==3.16.0
