@@ -1,50 +1,25 @@
 #!/usr/bin/env python3
-"""Task 2 - Phase Optimization: robust, condition-agnostic RIS config proposer.
+"""
+Task 2 submission for team the_silent_subcarriers.
 
-Team `the_silent_subcarriers`.
+For each evaluation condition, propose a binary 256-element RIS configuration for
+high center-subcarrier Gaussian mutual information. The script supports two modes:
 
-For each evaluation condition (antenna type, transmitter position) returned by the
-official Task 2 loader, propose a BINARY 256-element RIS configuration s in {0,1}^256
-that maximizes the center-subcarrier Gaussian mutual information
+* robust: choose the best measured configuration for the condition. This is the
+  default because it is valid whether the scorer is a lookup, a diagnostic, or an
+  oracle.
+* aggressive: fit an affine channel surrogate and solve its binary phase-sweep
+  optimum exactly. This is useful only if arbitrary off-measured configurations
+  are scored by a smooth oracle.
 
-        I(s) = log2(1 + rho * |h_norm(s)|^2),   rho = 10^(snr_db/10) = 10  (SNR 10 dB),
+Both modes emit binary vectors and stay far below the 20M-parameter limit. The
+code is condition-agnostic: at grading it uses the official loader if available,
+or otherwise discovers the measured .mat files in the dataset path.
 
-with the NORMALIZED channel h_norm = h / power_scale, where
-power_scale = sqrt(mean(|h|^2)) over that condition's measured configs. This is the
-OFFICIAL convention implemented in `Task_2_Phase-Opt.py::gaussian_mi_bits` /
-`power_scale = sqrt(mean(|averaged_csi[present]|^2))`. (The "raw" log2(1+|h|^2) ~28-bit
-numbers are the WRONG units for the leaderboard and are NOT used or reported here.)
+Useful commands:
 
-WHY ROBUST-BY-DEFAULT
----------------------
-The official scorer is UNPUBLISHED. Per the spec, "the official evaluation computes the
-mutual information achieved by the submitted configuration using the held-out
-ground-truth measurements OR the official evaluation oracle"; a 10-nearest-neighbor
-Hamming approximation is described only as a baseline DIAGNOSTIC. So the scorer is one of:
-  (A) ground-truth lookup of a measured config,   (B) the 10-NN-in-Hamming diagnostic,
-  (C) an organizer "evaluation oracle" model.
-A novel surrogate-optimal config (the exact affine phase-sweep optimum) reaches
-~7.9 normalized bits ONLY under (C) a smooth oracle that agrees with our surrogate;
-under (A) it is unscorable (it is not a measured config) and under (B) it regresses
-BELOW the best-measured floor. It sits 40-100 Hamming bits from any measurement ->
-unverifiable extrapolation. The best-MEASURED config has a KNOWN true MI and is valid
-under EVERY scorer (exact under A, ~itself under B, on-manifold under C). It is therefore
-the maximin-optimal submission. We default to it and expose the aggressive optimum only
-as an explicit, clearly-labelled contingency.
-
-  --mode robust      (default): submit the best-measured config       (~5.94 bits, safe).
-  --mode aggressive          : submit the exact affine phase-sweep opt (~7.9 bits under a
-                               smooth oracle ONLY; unmeasurable under ground-truth lookup).
-
-Models: best-measured = 0 trainable params; affine surrogate = 257 complex params. Both
-are far below the 20,000,000-parameter Task 2 limit.
-1-bit binary configs only. Condition-agnostic: at grading, the official loader supplies
-each condition's measured table (public OR private) and we fit per condition. No
-private-position data is used during development.
-
-Run:
-    python the_silent_subcarriers_2.py                         # all conditions the loader exposes  -> proposed_configs.json
-    python the_silent_subcarriers_2.py --mode aggressive       # contingency submission
+    python the_silent_subcarriers_2.py
+    python the_silent_subcarriers_2.py --mode aggressive
     python the_silent_subcarriers_2.py --data /path/to/ISIT2026-challenge-dataset
 """
 from __future__ import annotations

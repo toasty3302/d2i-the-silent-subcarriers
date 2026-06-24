@@ -1,65 +1,28 @@
 """
-Team `the_silent_subcarriers` --- ISIT 2026 D2I "The Still Mirror", Task 0.
-=========================================================================
+Task 0 submission for team the_silent_subcarriers.
 
-Task 0 -- given a 16x16 binary RIS configuration, predict the complex channel
-(CSI): 242 sub-carriers => 484 stacked real/imag numbers, for each of the
-8 measurement conditions = {Dipole, Log} antenna x positions {1, 2, 3, 5}.
+Given a 16 x 16 binary RIS configuration, predict the complex CSI over 242
+subcarriers for each public antenna/position condition. The script trains or
+replays one independent predictor per condition.
 
-We train ONE independent predictor per condition (8 in total). Each predictor is
-a blend of two models that make *different* errors:
+The shipped model blends two pieces:
 
-  prediction = convex_blend( quad , cnn_ensemble )                       (per SVD component)
+* a closed-form quadratic ridge model on RIS reflection states and nearby pair
+  products, decoded through a rank-32 SVD channel basis;
+* a small CNN ensemble that learns residual structure not captured by the
+  quadratic model.
 
-  * quad : a closed-form ridge regression on physically motivated features
-           [bias, 256 RIS reflection bits, 1808 nearest-neighbour coupling
-           products  s_i * s_j], solved in a fixed rank-32 SVD subspace of the
-           channel. No iterative training -- a single linear solve.
-  * cnn  : a small CNN ensemble. Each net: a learnable per-element complex
-           reflection lift -> conv stem -> residual conv blocks (squeeze-excite)
-           -> (Log only) one self-attention layer over the 256 panel positions
-           -> MLP, decoded through the same rank-32 SVD basis.
-           Log: 4 seeds + attention.  Dipole: 2 seeds, no attention.
+For the structured macro-block configurations, a tiny closed-form refinement is
+used because those RIS states have much lower intrinsic dimension. All of this is
+counted in the per-condition parameter budget.
 
-On top of that, a leak-free **config-structure refinement**: the public config
-set contains highly structured "macro-block" layouts (config_id 1..16 are four
-uniform 8x8 blocks; config_id 17..528 are nine uniform blocks on a (5,5,6) grid).
-For those test configs the channel is an exact affine/quadratic function of just
-4 or 9 macro-bits, so we replace the CNN's prediction there with a tiny
-closed-form macro-block model fit on the training configs of the same family.
+Common commands:
 
-================================  RULES  ================================
-* Regime-A (no leakage). Every model is fit ONLY on the public training configs
-  (train.csv: RIS bits + measured CSI). The 2000 held-out *test* configs are used
-  for INPUT (their RIS bits) only -- their channels are never read during fit or
-  model selection. The private positions {4,6,7,8,9} are never read at all.
-* Parameter budget. Each of the 8 predictors has < 1,000,000 trainable params:
-      Log    : 4 x 223,308 (cnn) + 82,052 (quad) =   975,284  <= 1,000,000
-      Dipole : 2 x 412,600 (cnn) + 82,052 (quad) =   907,252  <= 1,000,000
-  Run `python the_silent_subcarriers_0.py params` to print/verify these.
+    DATA=data python the_silent_subcarriers_0.py reproduce
+    DATA=data python the_silent_subcarriers_0.py train
+    python the_silent_subcarriers_0.py params
 
-================================  USAGE  ================================
-  # 0. one-off: turn the official Kaggle CSVs into the per-condition .npy
-  #    arrays this script reads (also writes train/test config_id arrays).
-  python prep_data.py  <kaggle_dir>  <data_dir>          # e.g. kaggle_data  data
-
-  # 1. reproduce the submission from the shipped weights (CPU, ~1-2 min, no GPU):
-  DATA=<data_dir> python the_silent_subcarriers_0.py reproduce
-        -> writes submission.csv
-
-  # 2. (optional) retrain all 8 predictors from scratch (GPU recommended), then
-  #    rebuild the submission with the freshly trained weights:
-  DATA=<data_dir> python the_silent_subcarriers_0.py train
-        -> writes models/the_silent_subcarriers_0.pth  and  submission.csv
-
-  # 3. print the per-predictor parameter counts (budget compliance):
-  python the_silent_subcarriers_0.py params
-
-`<data_dir>` must contain, per condition c in CONDS:
-    train_{c}_ris.npy  (N x 256 int8 RIS bits)   train_{c}_csi.npy (N x 484 f32 CSI)
-    train_{c}_cfg.npy  (N int   config_id)
-    test_{c}_ris.npy   (M x 256 int8)            test_{c}_eid.npy  (M object example_id)
-    test_{c}_cfg.npy   (M int   config_id)
+See README.md and SOLUTION_task0.md for setup, score, and data-use notes.
 """
 import sys, os, csv, numpy as np
 

@@ -1,37 +1,25 @@
 #!/usr/bin/env python3
-"""ISIT 2026 D2I "The Still Mirror" - Task 1 (Mutual Information estimation).
+"""
+Task 1 submission for team the_silent_subcarriers.
 
-Team: the_silent_subcarriers
+Each row contains 256 noisy complex CSI samples for one condition at the center
+subcarrier. The target is Gaussian-input mutual information in bits. The main
+estimator is the closed-form plug-in value
 
-Task 1 asks, for each (antenna_type, transmitter position, RIS configuration)
-example, for the mutual information in bits between the channel input and the
-channel output on the center OFDM subcarrier, under a Gaussian-input assumption,
-estimated from 256 noisy complex CSI samples (AWGN added to reach SNR = 10 dB).
-The official score is the RMSE (in bits) between the predicted and the held-out
-true mutual information.
+    0.5 * log2(1 + Var[h_noisy])
 
-Method (closed-form plug-in estimator + small ridge residual correction):
-  * Under the Gaussian-input model the per-example MI is
-        I = 0.5 * log2(1 + (sample_variance + noise_variance)),
-    and the variance of the 256 *noisy* samples is itself a nearly unbiased
-    estimate of (sample_variance + noise_variance). So the leading term is the
-    closed-form plug-in estimate  I_hat = 0.5 * log2(1 + Var[h_noisy]).
-  * A tiny ridge-regression residual model (11 coefficients) is fit on the
-    training labels to correct the small systematic gap of the plug-in term,
-    using a handful of summary statistics of the noisy samples as features.
+with a very small ridge residual correction fit from train.csv. There is no
+separate weight artifact; the model is refit from the bundled CSV data when the
+script runs.
 
-The model is fit at run time from the provided train.csv; there is no separate
-trained-weight artifact to ship. It reads ONLY the released Task 1 CSV package
-(train.csv / test.csv / sample_submission.csv). It never reads any held-out
-ground-truth MI for the test split (test.csv contains no mi_bits column).
+The script reads only the released Task 1 CSV package. test.csv has no MI labels,
+and local validation is grouped by RIS configuration ID.
 
-Usage (no arguments needed; paths default to the bundled ./data directory):
+Useful commands:
 
-    python the_silent_subcarriers_1.py            # writes ./submission.csv
-    python the_silent_subcarriers_1.py --params   # print parameter count
+    python the_silent_subcarriers_1.py
+    python the_silent_subcarriers_1.py --params
     python the_silent_subcarriers_1.py --help
-
-Only numpy is required (see packages.txt). CPU only; runs in well under a second.
 """
 
 from __future__ import annotations

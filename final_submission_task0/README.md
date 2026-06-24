@@ -1,107 +1,84 @@
-# ISIT 2026 D2I "The Still Mirror" — Task 0 (Channel Exploration)
+# ISIT 2026 D2I "The Still Mirror" - Task 0
 ### Team `the_silent_subcarriers`
 
-Predict the complex channel (CSI) from a 16×16 binary RIS configuration:
-**242 sub-carriers → 484 stacked real/imag values**, with one independent
-predictor for each of the **8 public conditions** =
-{Dipole, Log} receiver antenna × transmitter positions {1, 2, 3, 5}.
+Task 0 is the channel-prediction task. For each public receiver/position condition, the model gets a 16 x 16 binary RIS configuration and predicts the complex CSI over 242 subcarriers. In the submitted files, the complex output is represented as 484 real values: all real parts and all imaginary parts.
 
-## Result (official metric)
+There are 8 public conditions:
 
-The official Task-0 score is the **normalized MSE (NMSE)**, i.e. the normalized
-squared Frobenius error `‖Ĥ−H‖²_F / ‖H‖²_F`, averaged over the 8 conditions
-(lower is better; see the spec, *Task 0 → Evaluation metric*).
+```text
+{Dipole, Log} x positions {1, 2, 3, 5}
+```
 
-| | value |
-|---|---|
-| **Official Final Score — mean NMSE over the 8 conditions** | **0.00618  (−22.09 dB)** |
-| Equivalent public-leaderboard figure (un-normalized MSE, the number Kaggle shows) | ≈ **48,455** |
+We train one independent predictor for each condition. The official metric is normalized MSE (NMSE), averaged over the 8 conditions, so lower is better.
 
-This was obtained **without any test-set leakage** (see *Data-use integrity* below).
-It is at the level the dataset's own authors report: the BRISC paper (the team that
-ran this measurement campaign) fits the same model families on the same last-2,000
-held-out configurations and tops out around **−20 to −22 dB**, explicitly capped by a
-fixed, uncontrollable channel component (the RIS frame). Our −22.09 dB sits at that
-ceiling. The number is reproduced from the shipped artifacts below.
+## Result
 
----
+| metric | value |
+| --- | ---: |
+| Official-style mean NMSE over the 8 public conditions | 0.00618 |
+| Same value in dB | -22.09 dB |
+| Equivalent public-leaderboard unnormalized MSE | about 48,455 |
 
-## Contents
+This result is from the shipped `submission.csv`. It was produced without using held-out position data or test channels during model fitting. The score is close to the ceiling reported by the BRISC dataset authors for this measured setup, where a fixed uncontrolled channel component limits the benefit of larger models.
 
-| file | what it is |
-|---|---|
-| `the_silent_subcarriers_0.py` | the complete solution (model defs + training + reproduction + structure refinement + parameter-budget check). Self-contained. |
-| `prep_data.py` | one-off: build the per-condition `.npy` arrays the solver reads, from **either** the official Kaggle CSVs (`--source kaggle`, default) **or** the official BRISC `.mat` dataset (`--source brisc`). Both produce identical arrays (verified). |
-| `models/the_silent_subcarriers_0.pth` | the 8 trained predictors (per-condition CNN ensembles + SVD bases) and the per-component blend weights. |
-| `submission.csv` | the predictions for the 16,000 test rows (8 conditions × 2,000 configs). |
-| `packages.txt` | dependencies (`numpy`, `torch`). |
-| `SOLUTION_task0.md` | a write-up of the method, observations and verified result. |
+## Files
 
----
+| file | purpose |
+| --- | --- |
+| `the_silent_subcarriers_0.py` | Main Task 0 runner. It contains the model definitions, training path, reproduction path, structure refinement, and parameter counting. |
+| `prep_data.py` | Converts the official Kaggle CSVs or the BRISC `.mat` files into the per-condition arrays used by the runner. |
+| `models/the_silent_subcarriers_0.pth` | Saved weights for the 8 predictors. |
+| `submission.csv` | Submitted predictions for the 16,000 test rows. |
+| `packages.txt` | Python dependencies. |
+| `SOLUTION_task0.md` | Method notes, results, and integrity checks. |
 
 ## Setup
 
 ```bash
-pip install -r packages.txt          # numpy==2.4.6, torch==2.12.0 (CPU is enough)
+pip install -r packages.txt
 ```
 
-## Run
+## Reproduce the submission
+
+First build the per-condition arrays. Either source is acceptable; they were checked to produce the same arrays.
 
 ```bash
-# 0. one-off: build the per-condition .npy arrays. TWO equivalent data sources:
-#    (a) the official Kaggle CSVs  (<kaggle_dir> holds train.csv + test.csv):
+# From the official Kaggle files: train.csv and test.csv
 python prep_data.py --source kaggle --kaggle-dir <kaggle_dir> --out data
-#    (b) the official BRISC .mat dataset (configurations_10000.mat + antenna*_pos*.mat;
-#        the small RIS-only test.csv supplies only the list of target configs/example_ids):
+
+# Or from the BRISC .mat files
 python prep_data.py --source brisc --brisc-root <brisc_dataset_dir> --out data
-#    Both yield identical RIS arrays and per-config frame-averaged CSI (verified: RIS
-#    bit-exact, CSI relative error ~2e-8) -> identical model and submission.
+```
 
-# 1. reproduce submission.csv from the shipped weights  (CPU, no GPU):
+Then regenerate `submission.csv` from the shipped model weights:
+
+```bash
 DATA=data python the_silent_subcarriers_0.py reproduce
+```
 
-# 2. (optional) retrain all 8 predictors from scratch (GPU recommended), then
-#    rebuild submission.csv with the freshly trained weights:
+Optional commands:
+
+```bash
+# Retrain all 8 predictors, then rebuild submission.csv
 DATA=data python the_silent_subcarriers_0.py train
 
-# 3. print the per-predictor parameter counts (budget compliance):
+# Print the per-condition parameter counts
 python the_silent_subcarriers_0.py params
 ```
 
-`reproduce` regenerates the shipped `submission.csv` **byte-for-byte** from the saved
-weights (CPU-only, a few minutes — no GPU required). `train` overwrites
-`models/the_silent_subcarriers_0.pth` and then runs the same reproduction path.
+The `reproduce` command is CPU-only and regenerates the shipped submission from the saved weights. Training from scratch is GPU-recommended because the CNN ensembles are the slow part.
 
-> The reported NMSE is computed with the official formula (normalized squared
-> Frobenius error, averaged over the 8 conditions) against the per-configuration
-> frame-averaged CSI of the 2,000 evaluation configs — the same averaged-channel
-> truth the dataset authors use. This is offline scoring of the finished
-> `submission.csv` only; those channel values are **never** read while fitting or
-> selecting any model.
+## Constraint handling
 
----
+Each condition has its own predictor and stays below the 1M-parameter limit:
 
-## How the constraints are respected
+| predictor family | one CNN | seeds | quad | macro-block | total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Log conditions | 223,308 | 4 | 82,052 | 1,632 | 976,916 |
+| Dipole conditions | 412,600 | 2 | 82,052 | 1,632 | 908,884 |
 
-**Parameter budget — each of the 8 predictors is well under 1,000,000 trainable
-parameters** (the spec limit is 1M per predictor × 8 = 8M total; verify with
-`python the_silent_subcarriers_0.py params`):
+The parameter count includes the CNN ensemble, the quadratic model, the macro-block refinement head, and the per-component blend weights.
 
-| predictor | one CNN | × seeds | + quad | + macro-block | **total** |
-|---|---|---|---|---|---|
-| **Log** (×4 conditions) | 223,308 | × 4 | 82,052 | 1,632 | **976,916** ≤ 1,000,000 |
-| **Dipole** (×4 conditions) | 412,600 | × 2 | 82,052 | 1,632 | **908,884** ≤ 1,000,000 |
+## Data use
 
-The 8 predictors are completely independent (one model per condition); nothing is
-shared across conditions, so each is counted on its own. The total **includes the
-macro-block structure-refinement head** (+1,632/condition: a 9-block quadratic + 4-block
-linear model that, at inference, overwrites the CNN on the structured test configs);
-it reuses the quad's rank-32 SVD output basis (counted once), and the per-component blend
-adds 32 scalar weights per condition.
-
-**Data-use integrity (no leakage).** Every model is fit **only** on the public
-training configurations' RIS bits + measured CSI (Kaggle `train.csv`, or equivalently the
-BRISC `.mat` of the same public positions). The 2,000 evaluation configurations are used
-for their RIS bits (the model input) only — their channels are never read during fitting
-or model selection. The 5 held-out transmitter positions {4, 6, 7, 8, 9} are never read
-at all.
+The models are fit only on public-position training configurations. The evaluation rows are used for their RIS bits only, which are the model input. Their channel values are not used for training, blending, model selection, or debugging. Held-out transmitter positions `{4, 6, 7, 8, 9}` are not read.
