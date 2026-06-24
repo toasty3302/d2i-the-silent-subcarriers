@@ -1,7 +1,7 @@
 # ISIT 2026 D2I "The Still Mirror" - Task 3
 ### Team `the_silent_subcarriers`
 
-This is our Task 3 submission for secret-key generation. The task is to play Eve: predict the key bits Alice gets from her own noisy channel, while Eve only sees her own channel from a different transmitter position under the same RIS configuration. The metric is mean bit mismatch rate (BMR), so lower is better, and the submitted model has to stay under 40 million parameters.
+This is our Task 3 submission for secret-key generation. The task is to be Eve and predict the key bits Alice gets from her own noisy channel, while Eve only sees her own channel from a different transmitter position under the same RIS configuration. The metric is mean bit mismatch rate (BMR), so lower is better, and the submitted model has to stay under 40 million parameters.
 
 The headline local mock-test result is:
 
