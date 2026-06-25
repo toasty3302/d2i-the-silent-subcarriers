@@ -9,28 +9,28 @@ There are 8 public conditions:
 {Dipole, Log} x positions {1, 2, 3, 5}
 ```
 
-We train one independent predictor for each condition. The official metric is normalized MSE (NMSE), averaged over the 8 conditions, so lower is better.
+We train one independent predictor for each condition. The official metric is normalized MSE (NMSE), averaged over the 8 conditions.
+
+## Constraint handling
+
+Each condition has its own predictor and stays below the 1M-parameter limit:
+
+| predictor family | one CNN | seeds | quad | macro-block | total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Log conditions | 223,308 | 4 | 82,052 | 1,632 | 976,916 |
+| Dipole conditions | 412,600 | 2 | 82,052 | 1,632 | 908,884 |
+
+The parameter count includes the CNN ensemble, the quadratic model, the macro-block refinement head, and the per-component blend weights.
 
 ## Result
 
 | metric | value |
 | --- | ---: |
-| Official-style mean NMSE over the 8 public conditions | 0.00618 |
+| mean NMSE over the 8 public conditions | 0.00618 |
 | Same value in dB | -22.09 dB |
-| Equivalent public-leaderboard unnormalized MSE | about 48,455 |
+| mean raw MSE over the 8 public conditions | about 48,455 |
 
-This result is from the shipped `submission.csv`. It was produced without using held-out position data or test channels during model fitting. The score is close to the ceiling reported by the BRISC dataset authors for this measured setup, where a fixed uncontrolled channel component limits the benefit of larger models.
-
-## Files
-
-| file | purpose |
-| --- | --- |
-| `the_silent_subcarriers_0.py` | Main Task 0 runner. It contains the model definitions, training path, reproduction path, structure refinement, and parameter counting. |
-| `prep_data.py` | Converts the official Kaggle CSVs or the BRISC `.mat` files into the per-condition arrays used by the runner. |
-| `models/the_silent_subcarriers_0.pth` | Saved weights for the 8 predictors. |
-| `submission.csv` | Submitted predictions for the 16,000 test rows. |
-| `packages.txt` | Python dependencies. |
-| `SOLUTION_task0.md` | Method notes, results, and integrity checks. |
+This result is from the shipped `submission.csv`.
 
 ## Setup
 
@@ -38,7 +38,7 @@ This result is from the shipped `submission.csv`. It was produced without using 
 pip install -r packages.txt
 ```
 
-## Reproduce the submission
+## Run
 
 First build the per-condition arrays. Either source is acceptable; they were checked to produce the same arrays.
 
@@ -68,17 +68,36 @@ python the_silent_subcarriers_0.py params
 
 The `reproduce` command is CPU-only and regenerates the shipped submission from the saved weights. Training from scratch is GPU-recommended because the CNN ensembles are the slow part.
 
-## Constraint handling
+## Main approach
 
-Each condition has its own predictor and stays below the 1M-parameter limit:
+The final predictor is a small blend of two views of the same channel:
 
-| predictor family | one CNN | seeds | quad | macro-block | total |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Log conditions | 223,308 | 4 | 82,052 | 1,632 | 976,916 |
-| Dipole conditions | 412,600 | 2 | 82,052 | 1,632 | 908,884 |
+```text
+prediction = per-component convex blend of (quadratic ridge, CNN ensemble)
+then structured macro-block configs are refined by a tiny closed-form model
+```
 
-The parameter count includes the CNN ensemble, the quadratic model, the macro-block refinement head, and the per-component blend weights.
+The quadratic model is there because to model the affine relation in the RIS reflection states. The CNN ensemble is there to model the nonlinear residual structure that the quadratic model misses. They make different errors, so blending them by SVD component works better than choosing one model globally.
 
-## Data use
+Additionally, if the input has a macroblock configuration, we use a smaller closed-ridge regression model. The combined number of parameters of all the modes is less than the 1M limit.   
 
-The models are fit only on public-position training configurations. The evaluation rows are used for their RIS bits only, which are the model input. Their channel values are not used for training, blending, model selection, or debugging. Held-out transmitter positions `{4, 6, 7, 8, 9}` are not read.
+## Observations
+
+**Local coupling.** A full all-pairs quadratic would have 32,640 pair terms, which is too many for 8,000 training configurations. Instead we keep the 1,808 nearest-neighbor pair products on the panel. That captures local RIS coupling without giving the model enough freedom to memorize.
+
+**Low-rank output.** The 484-dimensional real/imag CSI output lives in a much smaller subspace. All predictors decode through a fixed rank-32 SVD basis from the training channels. This regularizes the output and keeps the parameter count under control.
+
+**Different model sizes for Dipole and Log.** Log needed more model diversity, so it uses 4 CNN seeds and one attention layer. Dipole was easier, so 2 seeds without attention were enough.
+
+**Structured config refinement.** The first RIS configurations are not random: the 4-block and 9-block macro layouts are much lower-dimensional. For those structured configs, a tiny model fit on the matching training family is more reliable than asking the CNN to extrapolate. The refinement affects 104 configs per condition and is counted in the parameter budget.
+
+## What we tried and did not keep
+
+A few things looked tempting but did not hold up:
+
+- Full all-pairs quadratic features fit training very well but generalize badly.
+- Larger CNNs and extra attention layers did not give a stable gain inside the 1M limit.
+- More output rank increased capacity without improving the final score enough.
+- Treating all conditions with the same architecture wasted parameters on Dipole and under-spent on Log.
+
+The final version is deliberately not the largest model we could fit. It is the mix that generalized best while staying under the per-condition cap.

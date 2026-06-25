@@ -1,9 +1,7 @@
 """Task 3 - Secret-key generation for team the_silent_subcarriers.
 
-This file contains the full Task 3 solution. The task is to act as Eve: use Eve's
-noisy CSI, the RIS configuration, and the public metadata to predict the key bits
-Alice extracts from her own noisy CSI. Lower mean bit mismatch rate (BMR) is better,
-and the submitted predictor must stay under 40M parameters.
+The task is to act as Eve: use Eve's noisy CSI, the RIS configuration, and the
+public metadata to predict the key bits Alice extracts from her own noisy CSI.
 
 The approach is deliberately extractor-aware. We first estimate Alice's clean CSI from
 RIS configuration features, then use Eve's observed residual CSI to correct that estimate.
@@ -21,22 +19,8 @@ The folded predictor has 1,025,596 parameters per condition. The majority-vote e
 pool is a decode-time uncertainty calibration; even if counted conservatively, the
 12-condition package stays well below the 40M limit.
 
-A few implementation details matter for reproducibility:
-
-* Alice's extractor is matched to the Sionna reference behavior. Because of Sionna's LLR
-  sign convention, the hard Viterbi is applied to the complement of the raw Gray bits.
-* Fitting and majority-vote calibration use training configurations only.
-* The script is deterministic for a fixed seed. Torch is optional and only speeds up the
-  Viterbi path when CUDA is available; the NumPy path is the reference fallback.
-
-See SOLUTION_task3.md for the score table, ablations, and longer rationale.
-
-Useful commands:
-    python the_silent_subcarriers_3.py
-    python the_silent_subcarriers_3.py --antenna-type Dipole --alice-positions 1 --eve-positions 2
-    python the_silent_subcarriers_3.py --save-models
-    python the_silent_subcarriers_3.py --n-configs 400
 """
+
 from __future__ import annotations
 
 import argparse
@@ -51,28 +35,33 @@ import numpy as np
 import yaml
 
 MAX_TOTAL_PARAMS = 40_000_000
-SNR_DB_DEFAULT = 35.0          # competition spec: effective SNR 35 dB
-LAM_CSI = 1.0                  # ridge for the config->CSI maps
-LAM_GLS = 1e-3                 # relative ridge for the residual cross-covariance solve
-MV_SAMPLES = 64               # Monte-Carlo samples for majority-vote (Bayes) decoding
-MV_SCALES = (0.6, 0.8, 1.0, 1.2, 1.5)   # perturbation scales swept on the TRAIN cal split
-MV_CAL_FRAC = 0.2             # train fraction held out (train-only) to calibrate the scale
-MV_CAL_MAX = 800              # cap on calibration configs (bounds calibration cost)
-MV_CAL_SAMPLES = 16           # MC samples during calibration (the final decode uses MV_SAMPLES)
-MV_MAX_ROWS = 8192            # cap rows per batched Viterbi call in the majority vote (bounds memory)
+SNR_DB_DEFAULT = 35.0
+LAM_CSI = 1.0  # ridge for the config->CSI maps
+LAM_GLS = 1e-3  # relative ridge for the residual cross-covariance solve
+MV_SAMPLES = 64  # Monte-Carlo samples for majority-vote (Bayes) decoding
+MV_SCALES = (
+    0.6,
+    0.8,
+    1.0,
+    1.2,
+    1.5,
+)  # perturbation scales swept on the TRAIN cal split
+MV_CAL_FRAC = 0.2  # train fraction held out (train-only) to calibrate the scale
+MV_CAL_MAX = 800  # cap on calibration configs (bounds calibration cost)
+MV_CAL_SAMPLES = 16  # MC samples during calibration (the final decode uses MV_SAMPLES)
+MV_MAX_ROWS = (
+    8192  # cap rows per batched Viterbi call in the majority vote (bounds memory)
+)
 
 
-# =============================================================================
-# 1. EXACT EXTRACTOR  (quantiser + Gray + rate-1/3 K=5 Viterbi; Sionna-equivalent)
-# =============================================================================
-GEN = (0o25, 0o33, 0o37)       # standard rate-1/3 K=5 generators (octal 25,33,37)
+GEN = (0o25, 0o33, 0o37)  # standard rate-1/3 K=5 generators (octal 25,33,37)
 KK = 5
-NSTATES = 1 << (KK - 1)        # 16 trellis states
+NSTATES = 1 << (KK - 1)  # 16 trellis states
 
 
 def gray_code_bits(n_bits: int) -> np.ndarray:
-    v = np.arange(2 ** n_bits, dtype=np.int32)
-    g = v ^ (v >> 1)           # binary-reflected Gray code == graycode.tc_to_gray_code
+    v = np.arange(2**n_bits, dtype=np.int32)
+    g = v ^ (v >> 1)  # binary-reflected Gray code == graycode.tc_to_gray_code
     return ((g[:, None] >> np.arange(n_bits - 1, -1, -1)) & 1).astype(np.uint8)
 
 
@@ -101,7 +90,7 @@ def _viterbi_tables():
     mask = (1 << (KK - 1)) - 1
     for s in range(NSTATES):
         for b in (0, 1):
-            shift = (b << (KK - 1)) | s          # [u(t), state(4 prev inputs)]
+            shift = (b << (KK - 1)) | s  # [u(t), state(4 prev inputs)]
             ns[s, b] = (shift >> 1) & mask
             for gi, g in enumerate(GEN):
                 out[s, b, gi] = _parity(shift & g)
@@ -114,23 +103,26 @@ def _viterbi_tables():
 
 _NS, _OUT, _INC = _viterbi_tables()
 
-# Optional torch acceleration for the Viterbi hot loop (the majority-vote decode runs it
-# K times).  The official baseline already depends on torch; we fall back to pure NumPy if
-# it is absent, so the deliverable stays runnable with NumPy/SciPy/h5py/PyYAML alone.
+# Optional torch acceleration for the Viterbi hot loop (the majority-vote decode runs it K times).
 try:
     import torch as _torch
+
     _DEV = "cuda" if _torch.cuda.is_available() else "cpu"
     _OUTt = _torch.tensor(_OUT, device=_DEV, dtype=_torch.int64)
     _INCt = _torch.tensor(_INC, device=_DEV, dtype=_torch.int64)
-except Exception:                                  # pragma: no cover
+except Exception:
     _torch = None
 
 
 def _viterbi_decode_torch(raw_bits: np.ndarray) -> np.ndarray:
-    N = raw_bits.shape[0]; nst = raw_bits.shape[1] // 3
-    raw = _torch.as_tensor(raw_bits[:, :nst * 3], device=_DEV, dtype=_torch.int64).view(N, nst, 3)
+    N = raw_bits.shape[0]
+    nst = raw_bits.shape[1] // 3
+    raw = _torch.as_tensor(
+        raw_bits[:, : nst * 3], device=_DEV, dtype=_torch.int64
+    ).view(N, nst, 3)
     INF = 1 << 30
-    metrics = _torch.full((N, NSTATES), INF, device=_DEV, dtype=_torch.int64); metrics[:, 0] = 0
+    metrics = _torch.full((N, NSTATES), INF, device=_DEV, dtype=_torch.int64)
+    metrics[:, 0] = 0
     bstate = _torch.zeros((nst, N, NSTATES), device=_DEV, dtype=_torch.int64)
     bbit = _torch.zeros((nst, N, NSTATES), device=_DEV, dtype=_torch.uint8)
     s0, b0 = _INCt[:, 0, 0], _INCt[:, 0, 1]
@@ -143,12 +135,17 @@ def _viterbi_decode_torch(raw_bits: np.ndarray) -> np.ndarray:
         pick1 = c1 < c0
         metrics = _torch.where(pick1, c1, c0)
         bstate[st] = _torch.where(pick1, s1[None].expand(N, -1), s0[None].expand(N, -1))
-        bbit[st] = _torch.where(pick1, b1[None].expand(N, -1).to(_torch.uint8),
-                                b0[None].expand(N, -1).to(_torch.uint8))
-    state = metrics.argmin(1); idx = _torch.arange(N, device=_DEV)
+        bbit[st] = _torch.where(
+            pick1,
+            b1[None].expand(N, -1).to(_torch.uint8),
+            b0[None].expand(N, -1).to(_torch.uint8),
+        )
+    state = metrics.argmin(1)
+    idx = _torch.arange(N, device=_DEV)
     dec = _torch.zeros((N, nst), device=_DEV, dtype=_torch.uint8)
     for st in range(nst - 1, -1, -1):
-        dec[:, st] = bbit[st, idx, state]; state = bstate[st, idx, state]
+        dec[:, st] = bbit[st, idx, state]
+        state = bstate[st, idx, state]
     return dec.cpu().numpy()
 
 
@@ -162,14 +159,15 @@ def _viterbi_decode_batch(raw_bits: np.ndarray) -> np.ndarray:
         return _viterbi_decode_torch(raw_bits)
     N = raw_bits.shape[0]
     nst = raw_bits.shape[1] // 3
-    recv = raw_bits[:, :nst * 3].reshape(N, nst, 3).astype(np.int64)
+    recv = raw_bits[:, : nst * 3].reshape(N, nst, 3).astype(np.int64)
     INF = 1 << 30
-    metrics = np.full((N, NSTATES), INF, np.int64); metrics[:, 0] = 0
+    metrics = np.full((N, NSTATES), INF, np.int64)
+    metrics[:, 0] = 0
     bstate = np.zeros((nst, N, NSTATES), np.int16)
     bbit = np.zeros((nst, N, NSTATES), np.uint8)
     for st in range(nst):
         r = recv[:, st, :]
-        branch = np.abs(_OUT[None] - r[:, None, None, :]).sum(3)     # (N,16,2) Hamming
+        branch = np.abs(_OUT[None] - r[:, None, None, :]).sum(3)  # (N,16,2) Hamming
         cand = metrics[:, :, None] + branch
         nm = np.full((N, NSTATES), INF, np.int64)
         for t in range(NSTATES):
@@ -180,7 +178,8 @@ def _viterbi_decode_batch(raw_bits: np.ndarray) -> np.ndarray:
             bstate[st, :, t] = np.where(pick1, s1, s0)
             bbit[st, :, t] = np.where(pick1, b1, b0)
         metrics = nm
-    state = np.argmin(metrics, 1); idx = np.arange(N)
+    state = np.argmin(metrics, 1)
+    idx = np.arange(N)
     dec = np.zeros((N, nst), np.uint8)
     for st in range(nst - 1, -1, -1):
         dec[:, st] = bbit[st, idx, state]
@@ -201,12 +200,12 @@ def extract_keys(csi, levels, gray_bits, code_rate="1/3"):
 
 
 def bit_mismatch_rate(pred_bits, true_bits):
-    return float(np.mean(np.asarray(pred_bits).reshape(-1) != np.asarray(true_bits).reshape(-1)))
+    return float(
+        np.mean(np.asarray(pred_bits).reshape(-1) != np.asarray(true_bits).reshape(-1))
+    )
 
 
-# =============================================================================
-# 2. DATA  (config.yaml, RIS configs, averaged CSI streamed from the .mat files)
-# =============================================================================
+# data: (config.yaml, RIS configs, averaged CSI streamed from the .mat files)
 @dataclass(frozen=True)
 class DatasetConfig:
     root_dir: Path
@@ -238,6 +237,7 @@ def load_config(path: Path) -> DatasetConfig:
 
 def load_ris_configurations(cfg: DatasetConfig) -> np.ndarray:
     from scipy.io import loadmat
+
     m = np.asarray(loadmat(cfg.root_dir / cfg.config_file)["matrices"])
     if m.ndim != 3 or m.shape[1:] != (16, 16):
         raise ValueError(f"expected (N,16,16) RIS matrices, got {m.shape}")
@@ -248,8 +248,9 @@ def load_ris_configurations(cfg: DatasetConfig) -> np.ndarray:
 _CSI_CACHE: dict = {}
 
 
-def load_averaged_csi(data_file: Path, n_cfg: int, n_subcarriers: int,
-                      chunk: int = 32768):
+def load_averaged_csi(
+    data_file: Path, n_cfg: int, n_subcarriers: int, chunk: int = 32768
+):
     """Per-config AVERAGED complex CSI over all 242 sub-carriers, streamed from .mat.
 
     Averaging the ~60 frames per config is the spec's recommended preprocessing and
@@ -284,13 +285,13 @@ def load_averaged_csi(data_file: Path, n_cfg: int, n_subcarriers: int,
 
 def add_awgn_complex(csi, snr_db, rng, avg_power):
     npow = avg_power / (10.0 ** (snr_db / 10.0))
-    noise = np.sqrt(npow / 2.0) * (rng.normal(size=csi.shape) + 1j * rng.normal(size=csi.shape))
+    noise = np.sqrt(npow / 2.0) * (
+        rng.normal(size=csi.shape) + 1j * rng.normal(size=csi.shape)
+    )
     return csi + noise
 
 
-# =============================================================================
-# 3. MODEL  (config quadratic + Eve GLS residual transfer, folded to one linear map)
-# =============================================================================
+# model: (config quadratic + Eve GLS residual transfer, folded to one linear map)
 def adjacency_pairs(n=16, dmax=2.0):
     """Nearest-neighbour RIS element pairs (Euclidean distance <= dmax on the 16x16
     panel).  dmax=2 (4-neighbour + diagonal + distance-2) is the CV-validated sweet
@@ -338,38 +339,50 @@ class GLSModel:
     error vectors -- capturing the prediction's cross-subcarrier error correlations -- plus
     Alice's own 35 dB noise); whichever wins on a train-only calibration split is used.
     """
+
     pairs: np.ndarray
-    W_config: np.ndarray      # (n_qfeat, 2*nsub)
-    W_eve: np.ndarray         # (2*nsub, 2*nsub)
+    W_config: np.ndarray  # (n_qfeat, 2*nsub)
+    W_eve: np.ndarray  # (2*nsub, 2*nsub)
     levels: np.ndarray
     gray_bits: np.ndarray
-    pert_spec: dict = None    # {'mode':'iso'|'boot', ...} ; None => single decode
+    pert_spec: dict = None  # {'mode':'iso'|'boot', ...} ; None => single decode
 
     @property
     def n_parameters(self) -> int:
         return int(self.W_config.size + self.W_eve.size)
 
     def predict_csi(self, S_eval, eve_eval_csi):
-        ri = design_quad(S_eval, self.pairs) @ self.W_config + _ri(eve_eval_csi) @ self.W_eve
+        ri = (
+            design_quad(S_eval, self.pairs) @ self.W_config
+            + _ri(eve_eval_csi) @ self.W_eve
+        )
         return _csi(ri)
 
     def predict_bits(self, S_eval, eve_eval_csi, mv_samples=MV_SAMPLES, seed=0):
-        pred_ri = design_quad(S_eval, self.pairs) @ self.W_config + _ri(eve_eval_csi) @ self.W_eve
-        if not self.pert_spec or self.pert_spec.get("mode") in (None, "none") or mv_samples <= 1:
+        pred_ri = (
+            design_quad(S_eval, self.pairs) @ self.W_config
+            + _ri(eve_eval_csi) @ self.W_eve
+        )
+        if (
+            not self.pert_spec
+            or self.pert_spec.get("mode") in (None, "none")
+            or mv_samples <= 1
+        ):
             return extract_keys(_csi(pred_ri), self.levels, self.gray_bits)
-        return majority_vote_bits(pred_ri, self.levels, self.gray_bits,
-                                  self.pert_spec, mv_samples, seed)
+        return majority_vote_bits(
+            pred_ri, self.levels, self.gray_bits, self.pert_spec, mv_samples, seed
+        )
 
 
 def _mv_draw(pred_ri, spec, g, rng):
     """One (g, N, D) block of perturbed CSI predictions for the majority vote."""
     N, D = pred_ri.shape
     if spec["mode"] == "boot":
-        E = spec["errs"]                                   # (M, D) real held-out errors
+        E = spec["errs"]  # (M, D) real held-out errors
         idx = rng.integers(0, len(E), size=(g, N))
         pert = -spec["scale"] * E[idx] + spec["anoise"] * rng.standard_normal((g, N, D))
         return pred_ri[None] + pert
-    return pred_ri[None] + spec["sigma"] * rng.standard_normal((g, N, D))   # iso
+    return pred_ri[None] + spec["sigma"] * rng.standard_normal((g, N, D))  # iso
 
 
 def majority_vote_bits(pred_ri, levels, gray_bits, spec, K, seed=0):
@@ -387,7 +400,7 @@ def majority_vote_bits(pred_ri, levels, gray_bits, spec, K, seed=0):
     done = 0
     while done < K:
         g = min(G, K - done)
-        sims = _mv_draw(pred_ri, spec, g, rng)                        # (g, N, 484)
+        sims = _mv_draw(pred_ri, spec, g, rng)  # (g, N, 484)
         bits = extract_keys(_csi(sims.reshape(g * N, D)), levels, gray_bits)
         acc_g = bits.reshape(g, N, -1).sum(0).astype(np.int32)
         acc = acc_g if acc is None else acc + acc_g
@@ -395,8 +408,9 @@ def majority_vote_bits(pred_ri, levels, gray_bits, spec, K, seed=0):
     return (acc > (K / 2)).astype(np.uint8)
 
 
-def fit_gls_model(S_train, alice_train_clean, eve_train_noisy, alice_train_noisy,
-                  pairs) -> GLSModel:
+def fit_gls_model(
+    S_train, alice_train_clean, eve_train_noisy, alice_train_noisy, pairs
+) -> GLSModel:
     """Fit the config ridges + GLS residual transfer on TRAIN configs, fold to one map.
 
     h_A_hat = fA(c) + (eve_noisy - fE(c)) @ T^T,  fA=Xq@WA, fE=Xq@WE,
@@ -411,13 +425,18 @@ def fit_gls_model(S_train, alice_train_clean, eve_train_noisy, alice_train_noisy
     m = len(S_train)
     S_EE = rE.T @ rE / m
     S_AE = rA.T @ rE / m
-    T = S_AE @ np.linalg.inv(S_EE + LAM_GLS * np.trace(S_EE) / S_EE.shape[0] * np.eye(S_EE.shape[0]))
+    T = S_AE @ np.linalg.inv(
+        S_EE + LAM_GLS * np.trace(S_EE) / S_EE.shape[0] * np.eye(S_EE.shape[0])
+    )
     levels, gray = build_quantizer(alice_train_noisy)
-    return GLSModel(pairs=pairs, W_config=WA - WE @ T.T, W_eve=T.T, levels=levels, gray_bits=gray)
+    return GLSModel(
+        pairs=pairs, W_config=WA - WE @ T.T, W_eve=T.T, levels=levels, gray_bits=gray
+    )
 
 
-def calibrate_mv(S_tr, a_avg_tr, e_no_tr, a_no_tr, pairs, seed, snr_db,
-                 mv_cal_K=MV_CAL_SAMPLES):
+def calibrate_mv(
+    S_tr, a_avg_tr, e_no_tr, a_no_tr, pairs, seed, snr_db, mv_cal_K=MV_CAL_SAMPLES
+):
     """Choose the majority-vote perturbation law on a TRAIN-ONLY hold-out (regime-A).
 
     Carve a calibration slice out of the training configs, fit the model on the rest, and
@@ -439,30 +458,40 @@ def calibrate_mv(S_tr, a_avg_tr, e_no_tr, a_no_tr, pairs, seed, snr_db,
     if len(cal) < 8 or len(sub) < 16:
         m = fit_gls_model(S_tr, a_avg_tr, e_no_tr, a_no_tr, pairs)
         err = _ri(m.predict_csi(S_tr, e_no_tr)) - _ri(a_avg_tr)
-        return {"mode": "iso", "sigma": float(np.sqrt(np.mean(err ** 2)))}
+        return {"mode": "iso", "sigma": float(np.sqrt(np.mean(err**2)))}
     m = fit_gls_model(S_tr[sub], a_avg_tr[sub], e_no_tr[sub], a_no_tr[sub], pairs)
     pred_ri = _ri(m.predict_csi(S_tr[cal], e_no_tr[cal]))
-    errs = (pred_ri - _ri(a_avg_tr[cal])).astype(np.float32)          # held-out error vectors
-    err_std = float(np.sqrt(np.mean(errs ** 2)))
+    errs = (pred_ri - _ri(a_avg_tr[cal])).astype(np.float32)  # held-out error vectors
+    err_std = float(np.sqrt(np.mean(errs**2)))
     true_cal = extract_keys(a_no_tr[cal], m.levels, m.gray_bits)
-    base = bit_mismatch_rate(extract_keys(_csi(pred_ri), m.levels, m.gray_bits), true_cal)
+    base = bit_mismatch_rate(
+        extract_keys(_csi(pred_ri), m.levels, m.gray_bits), true_cal
+    )
     best_spec, best_bmr = None, base
-    for sc in MV_SCALES:                                              # isotropic
+    for sc in MV_SCALES:  # isotropic
         spec = {"mode": "iso", "sigma": sc * err_std}
-        b = bit_mismatch_rate(majority_vote_bits(pred_ri, m.levels, m.gray_bits, spec, mv_cal_K, seed + 13), true_cal)
+        b = bit_mismatch_rate(
+            majority_vote_bits(
+                pred_ri, m.levels, m.gray_bits, spec, mv_cal_K, seed + 13
+            ),
+            true_cal,
+        )
         if b < best_bmr:
             best_spec, best_bmr = spec, b
-    for sc in MV_SCALES:                                              # bootstrap (real error structure)
+    for sc in MV_SCALES:  # bootstrap (real error structure)
         spec = {"mode": "boot", "errs": errs, "scale": float(sc), "anoise": anoise}
-        b = bit_mismatch_rate(majority_vote_bits(pred_ri, m.levels, m.gray_bits, spec, mv_cal_K, seed + 29), true_cal)
+        b = bit_mismatch_rate(
+            majority_vote_bits(
+                pred_ri, m.levels, m.gray_bits, spec, mv_cal_K, seed + 29
+            ),
+            true_cal,
+        )
         if b < best_bmr:
             best_spec, best_bmr = spec, b
     return best_spec
 
 
-# =============================================================================
-# 4. PER-CONDITION ATTACK
-# =============================================================================
+# per-condition attack
 @dataclass
 class AttackResult:
     antenna_type: str
@@ -476,7 +505,7 @@ class AttackResult:
     bmr_single: float
     floor_bmr: float
     csi_nmse_db: float
-    baseline_ridge_bmr: float = float("nan")   # official plain Eve->Alice CSI ridge (optional)
+    baseline_ridge_bmr: float = float("nan")
 
 
 def _plain_ridge_bmr(S_tr, S_ev, e_no_tr, e_no_ev, a_no_tr, a_no_ev, levels, gray):
@@ -494,11 +523,25 @@ def _plain_ridge_bmr(S_tr, S_ev, e_no_tr, e_no_ev, a_no_tr, a_no_ev, levels, gra
     return bit_mismatch_rate(extract_keys(pred_csi, levels, gray), true_bits)
 
 
-def run_attack_setting(cfg, antenna_type, alice_position, eve_position,
-                       ris_vectors, snr_db, train_ratio, n_configs, seed,
-                       return_model=False, baseline_ridge=False):
-    a_file = cfg.root_dir / cfg.file_pattern.format(ant_type=antenna_type, pos_idx=alice_position)
-    e_file = cfg.root_dir / cfg.file_pattern.format(ant_type=antenna_type, pos_idx=eve_position)
+def run_attack_setting(
+    cfg,
+    antenna_type,
+    alice_position,
+    eve_position,
+    ris_vectors,
+    snr_db,
+    train_ratio,
+    n_configs,
+    seed,
+    return_model=False,
+    baseline_ridge=False,
+):
+    a_file = cfg.root_dir / cfg.file_pattern.format(
+        ant_type=antenna_type, pos_idx=alice_position
+    )
+    e_file = cfg.root_dir / cfg.file_pattern.format(
+        ant_type=antenna_type, pos_idx=eve_position
+    )
     if not a_file.exists() or not e_file.exists():
         raise FileNotFoundError(f"missing data file(s): {a_file.name} / {e_file.name}")
 
@@ -507,65 +550,102 @@ def run_attack_setting(cfg, antenna_type, alice_position, eve_position,
     e_avg, e_cnt = load_averaged_csi(e_file, n_cfg, cfg.n_subcarriers)
     present = np.where((a_cnt > 0) & (e_cnt > 0))[0]
 
-    # Use as many configs as available (more training data is the dominant BMR factor);
-    # --n-configs caps it only for fast smoke tests.
     if n_configs and n_configs < len(present):
-        present = np.sort(np.random.default_rng(seed).choice(present, n_configs, replace=False))
+        present = np.sort(
+            np.random.default_rng(seed).choice(present, n_configs, replace=False)
+        )
     perm = np.random.default_rng(seed).permutation(present)
     n_tr = min(max(int(round(train_ratio * len(perm))), 1), len(perm) - 1)
     tr, ev = np.sort(perm[:n_tr]), np.sort(perm[n_tr:])
 
-    # one 35 dB AWGN draw per config (independent for Alice and Eve)
     rng = np.random.default_rng(seed + 1000 * alice_position + eve_position)
-    avg_power = float(np.mean(np.abs(np.concatenate([a_avg[present], e_avg[present]], 0)) ** 2))
+    avg_power = float(
+        np.mean(np.abs(np.concatenate([a_avg[present], e_avg[present]], 0)) ** 2)
+    )
     a_no = add_awgn_complex(a_avg, snr_db, rng, avg_power)
     e_no = add_awgn_complex(e_avg, snr_db, rng, avg_power)
 
     pairs = adjacency_pairs(dmax=2.0)
     model = fit_gls_model(ris_vectors[tr], a_avg[tr], e_no[tr], a_no[tr], pairs)
-    # Bayes majority-vote perturbation law (iso vs boot), calibrated on a TRAIN-only hold-out:
-    model.pert_spec = calibrate_mv(ris_vectors[tr], a_avg[tr], e_no[tr],
-                                   a_no[tr], pairs, seed, snr_db)
+    model.pert_spec = calibrate_mv(
+        ris_vectors[tr], a_avg[tr], e_no[tr], a_no[tr], pairs, seed, snr_db
+    )
 
     true_bits = extract_keys(a_no[ev], model.levels, model.gray_bits)
-    pred_bits = model.predict_bits(ris_vectors[ev], e_no[ev])      # majority-vote decode
+    pred_bits = model.predict_bits(ris_vectors[ev], e_no[ev])
     bmr = bit_mismatch_rate(pred_bits, true_bits)
     bmr_single = bit_mismatch_rate(
-        extract_keys(model.predict_csi(ris_vectors[ev], e_no[ev]), model.levels, model.gray_bits),
-        true_bits)
+        extract_keys(
+            model.predict_csi(ris_vectors[ev], e_no[ev]), model.levels, model.gray_bits
+        ),
+        true_bits,
+    )
 
-    floor = bit_mismatch_rate(extract_keys(a_avg[ev], model.levels, model.gray_bits), true_bits)
+    floor = bit_mismatch_rate(
+        extract_keys(a_avg[ev], model.levels, model.gray_bits), true_bits
+    )
     pred_csi = model.predict_csi(ris_vectors[ev], e_no[ev])
-    nmse = float(10 * np.log10(np.linalg.norm(_ri(pred_csi) - _ri(a_avg[ev])) ** 2
-                               / np.linalg.norm(_ri(a_avg[ev])) ** 2))
+    nmse = float(
+        10
+        * np.log10(
+            np.linalg.norm(_ri(pred_csi) - _ri(a_avg[ev])) ** 2
+            / np.linalg.norm(_ri(a_avg[ev])) ** 2
+        )
+    )
     base_bmr = float("nan")
     if baseline_ridge:
-        base_bmr = _plain_ridge_bmr(ris_vectors[tr], ris_vectors[ev], e_no[tr], e_no[ev],
-                                    a_no[tr], a_no[ev], model.levels, model.gray_bits)
-    res = AttackResult(antenna_type, alice_position, eve_position, len(tr), len(ev),
-                       int(true_bits.size), model.n_parameters, bmr, bmr_single, floor, nmse,
-                       base_bmr)
+        base_bmr = _plain_ridge_bmr(
+            ris_vectors[tr],
+            ris_vectors[ev],
+            e_no[tr],
+            e_no[ev],
+            a_no[tr],
+            a_no[ev],
+            model.levels,
+            model.gray_bits,
+        )
+    res = AttackResult(
+        antenna_type,
+        alice_position,
+        eve_position,
+        len(tr),
+        len(ev),
+        int(true_bits.size),
+        model.n_parameters,
+        bmr,
+        bmr_single,
+        floor,
+        nmse,
+        base_bmr,
+    )
     return (res, model) if return_model else res
 
 
-# =============================================================================
-# 5. MAIN
-# =============================================================================
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", type=Path, default=Path("config.yaml"))
     p.add_argument("--antenna-types", nargs="+", default=None)
-    p.add_argument("--antenna-type", default=None, help="alias for a single antenna type")
+    p.add_argument(
+        "--antenna-type", default=None, help="alias for a single antenna type"
+    )
     p.add_argument("--alice-positions", type=int, nargs="+", default=[1, 2])
     p.add_argument("--eve-positions", type=int, nargs="+", default=[3, 4, 5, 6])
-    p.add_argument("--n-configs", type=int, default=0, help="0 = use all available configs")
+    p.add_argument(
+        "--n-configs", type=int, default=0, help="0 = use all available configs"
+    )
     p.add_argument("--train-ratio", type=float, default=0.8)
     p.add_argument("--snr-db", type=float, default=SNR_DB_DEFAULT)
     p.add_argument("--seed", type=int, default=None)
-    p.add_argument("--save-models", action="store_true",
-                   help="fit all PUBLIC (antenna, Alice, Eve) conditions and write models/")
-    p.add_argument("--baseline-ridge", action="store_true",
-                   help="also report the official plain Eve->Alice CSI ridge baseline (no config)")
+    p.add_argument(
+        "--save-models",
+        action="store_true",
+        help="fit all PUBLIC (antenna, Alice, Eve) conditions and write models/",
+    )
+    p.add_argument(
+        "--baseline-ridge",
+        action="store_true",
+        help="also report the official plain Eve->Alice CSI ridge baseline (no config)",
+    )
     p.add_argument("--results-dir", type=Path, default=Path("results/task3_secret_key"))
     p.add_argument("--models-dir", type=Path, default=Path("models"))
     return p.parse_args()
@@ -573,7 +653,7 @@ def parse_args():
 
 def main():
     if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)   # live progress under redirection
+        sys.stdout.reconfigure(line_buffering=True)  # live progress under redirection
     args = parse_args()
     cfg = load_config(args.config)
     seed = cfg.seed if args.seed is None else args.seed
@@ -594,9 +674,13 @@ def main():
     print(f"Antenna types   : {antennas}")
     print(f"Alice positions : {alice_pos}")
     print(f"Eve positions   : {eve_pos}")
-    print(f"SNR             : {args.snr_db:.1f} dB   (extractor: Gray-8 + rate-1/3 Viterbi)")
-    print(f"Configs         : {'all available' if not args.n_configs else args.n_configs}"
-          f"  (train_ratio={args.train_ratio})")
+    print(
+        f"SNR             : {args.snr_db:.1f} dB   (extractor: Gray-8 + rate-1/3 Viterbi)"
+    )
+    print(
+        f"Configs         : {'all available' if not args.n_configs else args.n_configs}"
+        f"  (train_ratio={args.train_ratio})"
+    )
 
     results, saved = [], {}
     for ant in antennas:
@@ -606,24 +690,42 @@ def main():
                     continue
                 try:
                     res, model = run_attack_setting(
-                        cfg, ant, al, ev, ris, args.snr_db, args.train_ratio,
-                        args.n_configs, seed, return_model=True,
-                        baseline_ridge=args.baseline_ridge)
+                        cfg,
+                        ant,
+                        al,
+                        ev,
+                        ris,
+                        args.snr_db,
+                        args.train_ratio,
+                        args.n_configs,
+                        seed,
+                        return_model=True,
+                        baseline_ridge=args.baseline_ridge,
+                    )
                 except FileNotFoundError as e:
                     print(f"  skip {ant} A{al}<-E{ev}: {e}")
                     continue
                 results.append(res)
-                base_str = (f"  ridge-baseline={res.baseline_ridge_bmr:.4f}"
-                            if args.baseline_ridge else "")
-                print(f"  {ant:6s} A{al}<-E{ev}: BMR={res.bmr:.4f} (single {res.bmr_single:.4f})  "
-                      f"floor={res.floor_bmr:.4f}  NMSE={res.csi_nmse_db:.1f}dB  "
-                      f"params={res.model_params:,}{base_str}", flush=True)
+                base_str = (
+                    f"  ridge-baseline={res.baseline_ridge_bmr:.4f}"
+                    if args.baseline_ridge
+                    else ""
+                )
+                print(
+                    f"  {ant:6s} A{al}<-E{ev}: BMR={res.bmr:.4f} (single {res.bmr_single:.4f})  "
+                    f"floor={res.floor_bmr:.4f}  NMSE={res.csi_nmse_db:.1f}dB  "
+                    f"params={res.model_params:,}{base_str}",
+                    flush=True,
+                )
                 if args.save_models:
                     saved[f"{ant}_A{al}_E{ev}"] = dict(
-                        pairs=model.pairs, W_config=model.W_config.astype(np.float32),
+                        pairs=model.pairs,
+                        W_config=model.W_config.astype(np.float32),
                         W_eve=model.W_eve.astype(np.float32),
-                        levels=model.levels, gray_bits=model.gray_bits,
-                        pert_spec=model.pert_spec)
+                        levels=model.levels,
+                        gray_bits=model.gray_bits,
+                        pert_spec=model.pert_spec,
+                    )
 
     if not results:
         raise RuntimeError("no conditions evaluated (check data files / positions)")
@@ -635,30 +737,43 @@ def main():
     print("\nTask 3 attack summary")
     print("---------------------")
     for i, r in enumerate(results, 1):
-        print(f"  {i:2d}/{len(results)} {r.antenna_type:6s} Alice={r.alice_position} "
-              f"Eve={r.eve_position}  BMR={r.bmr:.4f}")
-    print(f"\nfinal_average_bmr = {avg:.6f}   (single-decode {avg_single:.6f}, "
-          f"noise floor {floor:.4f})")
+        print(
+            f"  {i:2d}/{len(results)} {r.antenna_type:6s} Alice={r.alice_position} "
+            f"Eve={r.eve_position}  BMR={r.bmr:.4f}"
+        )
+    print(
+        f"\nfinal_average_bmr = {avg:.6f}   (single-decode {avg_single:.6f}, "
+        f"noise floor {floor:.4f})"
+    )
     if args.baseline_ridge:
         base_avg = float(np.mean([r.baseline_ridge_bmr for r in results]))
-        print(f"official_ridge_baseline_bmr = {base_avg:.6f}   "
-              f"(plain Eve->Alice CSI ridge, ignores the RIS config)")
-    print(f"params/condition  = {results[0].model_params:,}  "
-          f"(<= 40M budget allows {MAX_TOTAL_PARAMS // results[0].model_params} conditions)")
+        print(
+            f"official_ridge_baseline_bmr = {base_avg:.6f}   "
+            f"(plain Eve->Alice CSI ridge, ignores the RIS config)"
+        )
+    print(
+        f"params/condition  = {results[0].model_params:,}  "
+        f"(<= 40M budget allows {MAX_TOTAL_PARAMS // results[0].model_params} conditions)"
+    )
     if total_params > MAX_TOTAL_PARAMS:
-        print(f"WARNING: {len(results)} conditions x {results[0].model_params:,} "
-              f"= {total_params:,} exceeds the 40M budget.")
+        print(
+            f"WARNING: {len(results)} conditions x {results[0].model_params:,} "
+            f"= {total_params:,} exceeds the 40M budget."
+        )
 
-    # Persisting the per-condition results npz is a convenience, not the deliverable
-    # (the headline BMR is already printed above).  Never let a non-writable working
-    # directory turn a successful evaluation into a crash.
     try:
         args.results_dir.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(args.results_dir / "task3_secret_key_results.npz",
-                            rows=np.array([r.__dict__ for r in results], dtype=object),
-                            final_average_bmr=avg, noise_floor_bmr=floor,
-                            antennas=np.array(antennas), snr_db=args.snr_db)
-        print(f"Saved results to {(args.results_dir / 'task3_secret_key_results.npz').resolve()}")
+        np.savez_compressed(
+            args.results_dir / "task3_secret_key_results.npz",
+            rows=np.array([r.__dict__ for r in results], dtype=object),
+            final_average_bmr=avg,
+            noise_floor_bmr=floor,
+            antennas=np.array(antennas),
+            snr_db=args.snr_db,
+        )
+        print(
+            f"Saved results to {(args.results_dir / 'task3_secret_key_results.npz').resolve()}"
+        )
     except OSError as e:
         print(f"(results npz not written: {e}; the printed BMR above is the result)")
 
@@ -669,13 +784,21 @@ def main():
             pass
         out = args.models_dir / "the_silent_subcarriers_3.pkl"
         with open(out, "wb") as fh:
-            pickle.dump(dict(conditions=saved, snr_db=args.snr_db,
-                             note="folded GLS Eve->Alice linear maps; "
-                                  "h_A_ri = design_quad(S)@W_config + eve_ri@W_eve"), fh)
+            pickle.dump(
+                dict(
+                    conditions=saved,
+                    snr_db=args.snr_db,
+                    note="folded GLS Eve->Alice linear maps; "
+                    "h_A_ri = design_quad(S)@W_config + eve_ri@W_eve",
+                ),
+                fh,
+            )
         per = next(iter(saved.values()))
         n_per = per["W_config"].size + per["W_eve"].size
-        print(f"Saved {len(saved)} condition models to {out.resolve()}  "
-              f"({n_per:,} params each, {n_per*len(saved):,} total <= 40M)")
+        print(
+            f"Saved {len(saved)} condition models to {out.resolve()}  "
+            f"({n_per:,} params each, {n_per * len(saved):,} total <= 40M)"
+        )
 
 
 if __name__ == "__main__":
