@@ -28,6 +28,7 @@ import argparse
 import glob
 import json
 import os
+import pickle
 import re
 from pathlib import Path
 
@@ -36,6 +37,8 @@ import numpy as np
 CENTER_DEFAULT = 121
 SNR_DB_DEFAULT = 10.0
 LAM = 1.0
+HERE = Path(__file__).resolve().parent
+DEFAULT_MODELS = HERE / "models" / "the_silent_subcarriers_2.pkl"
 
 
 # --------------------------------------------------------------------------- data
@@ -146,7 +149,7 @@ def solve_condition(S: np.ndarray, h: np.ndarray, counts: np.ndarray,
         aggressive_config=aggr_config, aggressive_mi_pred=aggr_mi_pred,
         aggressive_min_hamming_to_measured=ham, aggressive_ones=int(aggr_config.sum()),
         robust_ones=int(robust_config.sum()), power_scale=ps, n_present=int(present.sum()),
-        affine_params=int(bl.size),
+        affine_params=int(bl.size), affine_beta=bl,
     )
 
 
@@ -166,6 +169,42 @@ def discover_conditions(root: Path):
     return conds
 
 
+# ------------------------------------------------------------ trained-model artifact
+# Spec Submission Requirement #2 + Task 2 ("submit a model and optimization procedure",
+# <= 20M params). The MODEL is the per-condition affine CSI surrogate
+#   h_hat(s) = beta[0] + beta[1:] . s   (ris_config -> center-subcarrier complex CSI),
+# and the OPTIMIZATION PROCEDURE is phase_sweep_optimum() in this file, which solves the
+# exact binary phase-sweep argmax of the resulting MI. Saving the frozen surrogate makes
+# the "aggressive" proposed configs reproducible from the artifact alone.
+def save_models(surrogates: dict, out_path: Path, center: int, snr_db: float) -> None:
+    # complex beta -> count real DoF (real+imag) for the parameter budget.
+    per = {k: int(v.size) * 2 for k, v in surrogates.items()}
+    total = sum(per.values())
+    artifact = {
+        "team": "the_silent_subcarriers",
+        "task": 2,
+        "model": "affine_csi_surrogate: h_hat = beta0 + beta[1:].s",
+        "optimizer": "phase_sweep_optimum (exact binary argmax, see source)",
+        "center_subcarrier": center,
+        "snr_db": snr_db,
+        "lam": LAM,
+        "note": (f"{len(surrogates)} per-condition affine surrogates; real DoF total "
+                 f"{total} << 20,000,000. Frozen after fit; configs proposed by the "
+                 f"optimizer in the .py."),
+        "surrogates": {k: np.asarray(v, dtype=np.complex128) for k, v in surrogates.items()},
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("wb") as fh:
+        pickle.dump(artifact, fh)
+    print(f"[models] saved {len(surrogates)} affine surrogates "
+          f"(real DoF total {total} << 20,000,000) -> {out_path}")
+
+
+def load_models(path: Path) -> dict:
+    with path.open("rb") as fh:
+        return pickle.load(fh)
+
+
 # ---------------------------------------------------------------------------- main
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
@@ -180,6 +219,9 @@ def main() -> None:
     p.add_argument("--center", type=int, default=CENTER_DEFAULT)
     p.add_argument("--snr-db", type=float, default=SNR_DB_DEFAULT)
     p.add_argument("--out", type=Path, default=Path("proposed_configs.json"))
+    p.add_argument("--save-models", action="store_true",
+                   help="Also save the fitted affine surrogates to models/ (spec req #2).")
+    p.add_argument("--models-path", type=Path, default=DEFAULT_MODELS)
     args = p.parse_args()
 
     # Official loader takes precedence (so this runs unchanged on PRIVATE conditions).
@@ -192,6 +234,7 @@ def main() -> None:
         print("[solve] official task2_loader not found -> dataset .mat discovery")
 
     out = {}
+    surrogates: dict = {}
     if conditions == "OFFICIAL":
         # Contract: task2_loader.evaluation_conditions() -> iterable of condition handles;
         # task2_loader.load_condition(c) -> (ris_vectors[10000,256], center_csi[10000] or
@@ -205,6 +248,7 @@ def main() -> None:
             counts = np.asarray(counts) if counts is not None else (np.abs(h) > 0).astype(int)
             res = solve_condition(ris, h.astype(np.complex128), counts, args.snr_db, args.center)
             key = getattr(c, "key", None) or str(c)
+            surrogates[key] = res["affine_beta"]
             cfg = res["aggressive_config"] if args.mode == "aggressive" else res["robust_config"]
             out[key] = dict(config=cfg.tolist(), mode=args.mode,
                             robust_mi_norm=res["robust_mi"],
@@ -222,6 +266,7 @@ def main() -> None:
             h, counts = load_center_csi(fp, args.center)
             res = solve_condition(S, h, counts, args.snr_db, args.center)
             key = f"{ant}_{pos}"
+            surrogates[key] = res["affine_beta"]
             cfg = res["aggressive_config"] if args.mode == "aggressive" else res["robust_config"]
             out[key] = dict(config=cfg.tolist(), mode=args.mode,
                             robust_mi_norm=res["robust_mi"],
@@ -230,6 +275,9 @@ def main() -> None:
             print(f"  {key}: robust(best-meas) {res['robust_mi']:.3f} | "
                   f"aggressive(pred) {res['aggressive_mi_pred']:.3f} bits "
                   f"(minHam {res['aggressive_min_hamming_to_measured']}) -> submit {args.mode}")
+
+    if args.save_models:
+        save_models(surrogates, args.models_path, args.center, args.snr_db)
 
     with open(args.out, "w") as fh:
         json.dump(out, fh, indent=2)

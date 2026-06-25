@@ -25,6 +25,7 @@ For reference, the MINE/SMILE-style neural baseline is around `0.13` bits held-o
 | --- | --- |
 | `the_silent_subcarriers_1.py` | Complete Task 1 solution: data loading, MI estimator, residual ridge fit, CV report, parameter count, and submission writing. |
 | `submission.csv` | Submitted predictions for the 72 test examples. |
+| `models/the_silent_subcarriers_1.pkl` | Saved trained-model artifact (spec req #2): the fitted estimator, stored as 8 condition entries (Dipole/Log × pos{1,2,3,5}). The estimator is condition-agnostic, so the 8 entries share tied weights; 31 params/model ≪ 2,000,000. |
 | `data/` | Bundled official Task 1 CSV files: train, test, sample submission, and metadata. |
 | `SOLUTION_task1.md` | Explanation of the estimator and validation caveats. |
 | `packages.txt` | Minimal dependencies. |
@@ -55,6 +56,14 @@ Check the parameter count:
 
 ```bash
 python the_silent_subcarriers_1.py --params
+```
+
+Regenerate the saved model artifact, then rebuild the submission from it (the two
+submissions are bit-for-bit identical):
+
+```bash
+python the_silent_subcarriers_1.py --save-models
+python the_silent_subcarriers_1.py --use-models
 ```
 
 To use a different copy of the official CSV package:

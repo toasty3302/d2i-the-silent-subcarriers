@@ -8,9 +8,10 @@ estimator is the closed-form plug-in value
 
     0.5 * log2(1 + Var[h_noisy])
 
-with a very small ridge residual correction fit from train.csv. There is no
-separate weight artifact; the model is refit from the bundled CSV data when the
-script runs.
+with a very small ridge residual correction fit from train.csv. The fitted model
+is also serialized to models/the_silent_subcarriers_1.pkl (spec Submission
+Requirement #2); the submission can be rebuilt either by refitting from the bundled
+CSV data or directly from that saved artifact (--use-models).
 
 The script reads only the released Task 1 CSV package. test.csv has no MI labels,
 and local validation is grouped by RIS configuration ID.
@@ -26,7 +27,8 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass
+import pickle
+from dataclasses import dataclass, asdict
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +38,10 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = HERE / "data"
 DEFAULT_OUTPUT = HERE / "submission.csv"
+DEFAULT_MODELS = HERE / "models" / "the_silent_subcarriers_1.pkl"
+
+# The 8 channel conditions of the task (spec: condition_count = 8).
+CONDITIONS = [f"{ant}_pos{pos}" for ant in ("Dipole", "Log") for pos in (1, 2, 3, 5)]
 
 # Hyperparameters of the shipped submission.
 #   lambda_ridge   : ridge penalty for the residual model (grouped-config-CV choice).
@@ -207,6 +213,59 @@ def predict(
 
 
 # --------------------------------------------------------------------------- #
+# Trained-model artifact (spec Submission Requirement #2: save in models/)
+# --------------------------------------------------------------------------- #
+# The estimator is condition-agnostic: a closed-form Gaussian-MI plug-in plus one
+# shared ridge-residual correction fit on the random-group training rows. The spec
+# asks for "8 models, <= 2M params each" (one per channel condition), so the saved
+# artifact is a dict keyed by the 8 conditions. Our method ties their weights (the
+# same fitted estimator serves every condition), which is recorded explicitly; each
+# condition's model is identical and far under the 2M-parameter limit.
+def fit_shared_model(data_dir: Path, lam: float) -> RidgeResidualModel:
+    train = load_task1_csv(data_dir / "train.csv")
+    features, baseline = feature_matrix(train)
+    train_mask = np.array([row["config_group"] == "random" for row in train.rows])
+    if not train_mask.any():
+        train_mask = np.ones(len(train.rows), dtype=bool)
+    return fit_ridge_residual(features, baseline, train.target, train_mask, lam=lam)
+
+
+def save_models(data_dir: Path, out_path: Path, lam: float, residual_scale: float) -> None:
+    model = fit_shared_model(data_dir, lam)
+    state = {"beta": model.beta, "mean": model.mean, "scale": model.scale, "lam": model.lam}
+    artifact = {
+        "team": "the_silent_subcarriers",
+        "task": 1,
+        "estimator": "closed_form_gaussian_mi + ridge_residual",
+        "residual_scale": residual_scale,
+        "condition_agnostic": True,
+        "note": ("One shared estimator serves all 8 conditions; per-condition entries "
+                 "below hold the same tied weights. Per model: "
+                 f"{model.num_parameters()} params << 2,000,000."),
+        # Spec asks for 8 models -> one entry per condition (tied weights).
+        "models": {cond: state for cond in CONDITIONS},
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("wb") as fh:
+        pickle.dump(artifact, fh)
+    print(f"saved 8-condition model artifact ({model.num_parameters()} params/model) -> {out_path}")
+
+
+def load_model(path: Path) -> RidgeResidualModel:
+    with path.open("rb") as fh:
+        artifact = pickle.load(fh)
+    # All 8 condition entries are tied; load any one (the first condition).
+    st = artifact["models"][CONDITIONS[0]]
+    return RidgeResidualModel(lam=st["lam"], beta=st["beta"], mean=st["mean"], scale=st["scale"])
+
+
+def predict_with_model(model: RidgeResidualModel, test: Task1Data, residual_scale: float) -> np.ndarray:
+    _, test_baseline = feature_matrix(test)
+    test_features, _ = feature_matrix(test)
+    return test_baseline + residual_scale * model.predict_residual(test_features)
+
+
+# --------------------------------------------------------------------------- #
 # Leakage-free validation (grouped by RIS configuration id)
 # --------------------------------------------------------------------------- #
 def rmse(pred: np.ndarray, target: np.ndarray) -> float:
@@ -261,12 +320,18 @@ def report_validation(train: Task1Data, lam: float, residual_scale: float) -> No
 # --------------------------------------------------------------------------- #
 # Submission writing
 # --------------------------------------------------------------------------- #
-def write_submission(data_dir: Path, output: Path, lam: float, residual_scale: float) -> None:
+def write_submission(data_dir: Path, output: Path, lam: float, residual_scale: float,
+                     models_path: Path | None = None) -> None:
     train = load_task1_csv(data_dir / "train.csv")
     test = load_task1_csv(data_dir / "test.csv")
     sample_rows, _ = load_rows(data_dir / "sample_submission.csv")
 
-    pred = predict(train, test, lam=lam, residual_scale=residual_scale)
+    if models_path is not None:
+        model = load_model(models_path)
+        pred = predict_with_model(model, test, residual_scale)
+        print(f"predicted from saved model artifact {models_path}")
+    else:
+        pred = predict(train, test, lam=lam, residual_scale=residual_scale)
 
     pred_by_id = {row["example_id"]: value for row, value in zip(test.rows, pred, strict=True)}
     missing = [row["example_id"] for row in sample_rows if row["example_id"] not in pred_by_id]
@@ -313,6 +378,13 @@ def parse_args() -> argparse.Namespace:
                         help="Skip printing the leakage-free CV report.")
     parser.add_argument("--params", action="store_true",
                         help="Print the parameter count and exit.")
+    parser.add_argument("--save-models", action="store_true",
+                        help="Fit and save the trained-model artifact to models/ and exit.")
+    parser.add_argument("--use-models", action="store_true",
+                        help="Build submission.csv from the saved models/ artifact "
+                             "instead of refitting.")
+    parser.add_argument("--models-path", type=Path, default=DEFAULT_MODELS,
+                        help="Path to the trained-model artifact (default: ./models/...pkl).")
     return parser.parse_args()
 
 
@@ -321,10 +393,14 @@ def main() -> None:
     if args.params:
         print_parameters(args.data_dir, args.lambda_ridge)
         return
+    if args.save_models:
+        save_models(args.data_dir, args.models_path, args.lambda_ridge, args.residual_scale)
+        return
     train = load_task1_csv(args.data_dir / "train.csv")
     if not args.skip_validation:
         report_validation(train, args.lambda_ridge, args.residual_scale)
-    write_submission(args.data_dir, args.output, args.lambda_ridge, args.residual_scale)
+    write_submission(args.data_dir, args.output, args.lambda_ridge, args.residual_scale,
+                     models_path=args.models_path if args.use_models else None)
 
 
 if __name__ == "__main__":

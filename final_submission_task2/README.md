@@ -32,6 +32,7 @@ The aggressive file is a real optimization result, but it is far from the measur
 | `the_silent_subcarriers_2.py` | Condition-agnostic model and optimization procedure. |
 | `proposed_configs.json` | Primary robust config set. |
 | `proposed_configs_aggressive.json` | Alternative aggressive config set. |
+| `models/the_silent_subcarriers_2.pkl` | Saved trained-model artifact (spec req #2): the 8 per-condition affine CSI surrogates (`h_hat = beta0 + beta[1:]·s`), frozen after fitting. 257 complex coeffs/condition = 4,112 real DoF total ≪ 20,000,000. The aggressive configs are reproducible from this artifact via `phase_sweep_optimum`. |
 | `SOLUTION_task2.md` | Method notes, scorer ambiguity, and validation checks. |
 | `packages.txt` | Dependencies. |
 
@@ -48,6 +49,9 @@ python the_silent_subcarriers_2.py --mode aggressive
 
 # Explicit dataset path
 python the_silent_subcarriers_2.py --data /path/to/ISIT2026-challenge-dataset --out proposed_configs.json
+
+# Also save the fitted affine surrogates to models/ (spec req #2)
+python the_silent_subcarriers_2.py --mode aggressive --save-models
 ```
 
 The script first tries the official `task2_loader`. If that is not available, it discovers the `antenna*_pos*.mat` files in the dataset directory. It does not hard-code the public positions, so the same procedure can run on private grading conditions supplied by the loader.
